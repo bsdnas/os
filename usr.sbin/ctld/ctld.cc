@@ -56,6 +56,7 @@
 #include <libutil++.hh>
 
 #include "conf.h"
+#include "control.hh"
 #include "ctld.hh"
 #include "isns.hh"
 
@@ -74,8 +75,8 @@ static void
 usage(void)
 {
 
-	fprintf(stderr, "usage: ctld [-d][-u][-f config-file]\n");
-	fprintf(stderr, "       ctld -t [-u][-f config-file]\n");
+	fprintf(stderr, "usage: ctld [-d][-u][-f config-file][-c control-socket]\n");
+	fprintf(stderr, "       ctld -t [-u][-f config-file][-c control-socket]\n");
 	exit(1);
 }
 
@@ -2359,6 +2360,7 @@ handle_connection(struct portal *portal, freebsd::fd_up fd,
 			log_err(1, "fork");
 		if (pid > 0)
 			return;
+		control_postfork();
 		conf->close_pidfile();
 	}
 
@@ -2378,7 +2380,7 @@ handle_connection(struct portal *portal, freebsd::fd_up fd,
 }
 
 static void
-main_loop(bool dont_fork)
+main_loop(struct conf *conf, bool dont_fork)
 {
 	struct kevent kev;
 	struct portal *portal;
@@ -2422,9 +2424,13 @@ main_loop(bool dont_fork)
 				log_err(1, "kevent");
 			}
 
+			control_handle_kqueue(*conf, &kev);
+
 			switch (kev.filter) {
 			case EVFILT_READ:
 				portal = reinterpret_cast<struct portal *>(kev.udata);
+				if (portal == nullptr)
+					break;
 				assert(portal->socket() == (int)kev.ident);
 
 				client_salen = sizeof(client_sa);
@@ -2663,8 +2669,9 @@ main(int argc, char **argv)
 	bool daemonize = true;
 	bool test_config = false;
 	bool use_ucl = false;
+	const char *control_socket = "/var/run/ctld.sock";
 
-	while ((ch = getopt(argc, argv, "dtuf:R")) != -1) {
+	while ((ch = getopt(argc, argv, "dtuf:Rc:")) != -1) {
 		switch (ch) {
 		case 'd':
 			daemonize = false;
@@ -2685,6 +2692,13 @@ main(int argc, char **argv)
 			    "does not support iSER protocol");
 #endif
 			proxy_mode = true;
+			break;
+		case 'c':
+			if (strcmp(optarg, "") == 0) {
+				control_socket = NULL;
+			} else {
+				control_socket = optarg;
+			}
 			break;
 		case '?':
 		default:
@@ -2734,6 +2748,12 @@ main(int argc, char **argv)
 		return (1);
 	}
 
+	// Open control-socket
+	if (control_socket != NULL) {
+		if (control_init(control_socket, kqfd) != 0)
+			log_warn("cannot initialize control socket");
+	}
+
 	error = newconf->apply(oldconf.get());
 	if (error != 0)
 		log_errx(1, "failed to apply configuration; exiting");
@@ -2745,7 +2765,7 @@ main(int argc, char **argv)
 	newconf->isns_schedule_update();
 
 	for (;;) {
-		main_loop(!daemonize);
+		main_loop(newconf.get(), !daemonize);
 		if (sighup_received) {
 			sighup_received = false;
 			log_debugx("received SIGHUP, reloading configuration");
@@ -2786,6 +2806,7 @@ main(int argc, char **argv)
 				log_warnx("failed to apply configuration");
 			oldconf.reset();
 
+			control_shutdown();
 			log_warnx("exiting on signal");
 			return (0);
 		} else {

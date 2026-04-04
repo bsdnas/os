@@ -122,6 +122,7 @@ struct auth_group {
 	bool add_initiator_portal(const char *initiator_portal);
 	bool initiator_permitted(const struct sockaddr *sa) const;
 
+	void control_reset();
 private:
 	void check_secret_length(const char *user, const char *secret,
 	    const char *secret_type);
@@ -239,6 +240,8 @@ struct portal_group {
 	int open_sockets(struct conf &oldconf);
 	void close_sockets();
 
+	void control_reset_discovery_auth_group();
+	void control_remove_port(struct target *target);
 protected:
 	struct conf			*pg_conf;
 	freebsd::nvlist_up		pg_options;
@@ -267,6 +270,7 @@ struct port {
 
 	struct target *target() const { return p_target; }
 	virtual struct auth_group *auth_group() const { return nullptr; }
+	virtual void control_reset_auth_group() {}
 	virtual struct portal_group *portal_group() const { return nullptr; }
 
 	virtual bool is_dummy() const { return true; }
@@ -279,6 +283,8 @@ struct port {
 
 	virtual bool kernel_create_port() = 0;
 	virtual bool kernel_remove_port() = 0;
+
+	uint32_t ctl_port() const { return p_ctl_port; }
 
 protected:
 	struct target			*p_target;
@@ -295,6 +301,7 @@ struct portal_group_port : public port {
 
 	struct auth_group *auth_group() const override
 	{ return p_auth_group.get(); }
+	void control_reset_auth_group() override { p_auth_group.reset(); }
 	struct portal_group *portal_group() const override
 	{ return p_portal_group; }
 
@@ -418,6 +425,8 @@ struct target {
 	void remove_port(struct port *port);
 	void verify();
 
+	void control_reset_auth();
+	void control_set_lun(int idx, struct lun *lun);
 protected:
 	bool use_private_auth(const char *keyword);
 	bool add_lun(u_int id, const char *lun_label, const char *lun_name);
@@ -520,6 +529,10 @@ struct conf {
 	bool reuse_portal_group_socket(struct portal &newp);
 	bool verify();
 
+	bool control_del_auth_group(std::string_view ag_name);
+	void control_del_lun(std::string_view lun_name);
+	void control_del_target(std::string_view target_name);
+	void control_del_port(struct target *target, struct portal_group *pg);
 private:
 	struct isns_req isns_register_request(const char *hostname);
 	struct isns_req isns_check_request(const char *hostname);
