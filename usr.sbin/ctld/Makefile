@@ -8,6 +8,7 @@ PROG_CXX=	ctld
 SRCS=		ctld.cc conf.cc discovery.cc iscsi.cc isns.cc kernel.cc
 SRCS+=		login.cc nvmf.cc nvmf_discovery.cc
 SRCS+=		parse.y token.l y.tab.h uclparse.cc
+SRCS+=		control.cc
 CFLAGS+=	-I${.CURDIR}
 CFLAGS+=	-I${SRCTOP}/sys
 CFLAGS+=	-I${SRCTOP}/sys/cam/ctl
