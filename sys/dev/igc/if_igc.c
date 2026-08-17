@@ -109,12 +109,15 @@ static void	igc_if_media_status(if_ctx_t, struct ifmediareq *);
 static int	igc_if_media_change(if_ctx_t);
 static int	igc_if_mtu_set(if_ctx_t, uint32_t);
 static void	igc_if_timer(if_ctx_t, uint16_t);
+static void	igc_if_vlan_register(if_ctx_t, u16);
+static void	igc_if_vlan_unregister(if_ctx_t, u16);
 static void	igc_if_watchdog_reset(if_ctx_t);
 static bool	igc_if_needs_restart(if_ctx_t, enum iflib_restart_event);
 
 static void	igc_identify_hardware(if_ctx_t);
 static int	igc_allocate_pci_resources(if_ctx_t);
 static void	igc_free_pci_resources(if_ctx_t);
+static void	igc_disable_broken_l1_2(if_ctx_t);
 static void	igc_reset(if_ctx_t);
 static int	igc_setup_interface(if_ctx_t);
 static int	igc_setup_msix(if_ctx_t);
@@ -128,10 +131,15 @@ static int	igc_if_rx_queue_intr_enable(if_ctx_t, uint16_t);
 static int	igc_if_tx_queue_intr_enable(if_ctx_t, uint16_t);
 static void	igc_if_multi_set(if_ctx_t);
 static void	igc_if_update_admin_status(if_ctx_t);
+static void	igc_apply_i225_ipg_workaround(struct igc_softc *);
 static void	igc_if_debug(if_ctx_t);
 static void	igc_update_stats_counters(struct igc_softc *);
 static void	igc_add_hw_stats(struct igc_softc *);
 static int	igc_if_set_promisc(if_ctx_t, int);
+static bool	igc_if_vlan_filter_capable(if_ctx_t);
+static bool	igc_if_vlan_filter_used(if_ctx_t);
+static void	igc_if_vlan_filter_enable(struct igc_softc *);
+static void	igc_if_vlan_filter_disable(struct igc_softc *);
 static void	igc_setup_vlan_hw_support(if_ctx_t);
 static void	igc_fw_version(struct igc_softc *);
 static void	igc_sbuf_fw_version(struct igc_fw_version *, struct sbuf *);
@@ -219,6 +227,8 @@ static device_method_t igc_if_methods[] = {
 	DEVMETHOD(ifdi_promisc_set, igc_if_set_promisc),
 	DEVMETHOD(ifdi_timer, igc_if_timer),
 	DEVMETHOD(ifdi_watchdog_reset, igc_if_watchdog_reset),
+	DEVMETHOD(ifdi_vlan_register, igc_if_vlan_register),
+	DEVMETHOD(ifdi_vlan_unregister, igc_if_vlan_unregister),
 	DEVMETHOD(ifdi_get_counter, igc_if_get_counter),
 	DEVMETHOD(ifdi_rx_queue_intr_enable, igc_if_rx_queue_intr_enable),
 	DEVMETHOD(ifdi_tx_queue_intr_enable, igc_if_tx_queue_intr_enable),
@@ -446,8 +456,9 @@ igc_set_num_queues(if_ctx_t ctx)
 
 #define	IGC_CAPS							\
     IFCAP_HWCSUM | IFCAP_VLAN_MTU | IFCAP_VLAN_HWTAGGING |		\
-    IFCAP_VLAN_HWCSUM | IFCAP_WOL | IFCAP_TSO4 | IFCAP_LRO |		\
-    IFCAP_VLAN_HWTSO | IFCAP_JUMBO_MTU | IFCAP_HWCSUM_IPV6 | IFCAP_TSO6
+    IFCAP_VLAN_HWCSUM | IFCAP_VLAN_HWFILTER | IFCAP_WOL | IFCAP_TSO4 |	\
+    IFCAP_LRO | IFCAP_VLAN_HWTSO | IFCAP_JUMBO_MTU |			\
+    IFCAP_HWCSUM_IPV6 | IFCAP_TSO6
 
 /*********************************************************************
  *  Device initialization routine
@@ -554,6 +565,9 @@ igc_if_attach_pre(if_ctx_t ctx)
 
 	/* Determine hardware and mac info */
 	igc_identify_hardware(ctx);
+
+	/* Apply device-specific PCIe L1.2 errata workarounds. */
+	igc_disable_broken_l1_2(ctx);
 
 	scctx->isc_tx_nsegments = IGC_MAX_SCATTER;
 	scctx->isc_nrxqsets_max =
@@ -797,7 +811,11 @@ igc_if_suspend(if_ctx_t ctx)
 static int
 igc_if_resume(if_ctx_t ctx)
 {
-	igc_if_init(ctx);
+	/*
+	 * PCIe config space, and with it L1.2, may have been reset
+	 * across the suspend/resume cycle.
+	 */
+	igc_disable_broken_l1_2(ctx);
 
 	return(0);
 }
@@ -1278,8 +1296,6 @@ igc_if_media_change(if_ctx_t ctx)
 		device_printf(sc->dev, "Unsupported media type\n");
 	}
 
-	igc_if_init(ctx);
-
 	return (0);
 }
 
@@ -1300,20 +1316,24 @@ igc_if_set_promisc(if_ctx_t ctx, int flags)
 
 	/* Don't disable if in MAX groups */
 	if (mcnt < MAX_NUM_MULTICAST_ADDRESSES)
-		reg_rctl &=  (~IGC_RCTL_MPE);
-	IGC_WRITE_REG(&sc->hw, IGC_RCTL, reg_rctl);
+		reg_rctl &= ~IGC_RCTL_MPE;
 
 	if (flags & IFF_PROMISC) {
 		reg_rctl |= (IGC_RCTL_UPE | IGC_RCTL_MPE);
 		/* Turn this on if you want to see bad packets */
 		if (igc_debug_sbp)
 			reg_rctl |= IGC_RCTL_SBP;
-		IGC_WRITE_REG(&sc->hw, IGC_RCTL, reg_rctl);
 	} else if (flags & IFF_ALLMULTI) {
 		reg_rctl |= IGC_RCTL_MPE;
 		reg_rctl &= ~IGC_RCTL_UPE;
-		IGC_WRITE_REG(&sc->hw, IGC_RCTL, reg_rctl);
 	}
+
+	if ((flags & IFF_PROMISC) || !igc_if_vlan_filter_used(ctx))
+		reg_rctl &= ~IGC_RCTL_VFE;
+	else
+		reg_rctl |= IGC_RCTL_VFE;
+	IGC_WRITE_REG(&sc->hw, IGC_RCTL, reg_rctl);
+
 	return (0);
 }
 
@@ -1392,6 +1412,33 @@ igc_if_timer(if_ctx_t ctx, uint16_t qid)
 }
 
 static void
+igc_apply_i225_ipg_workaround(struct igc_softc *sc)
+{
+	struct igc_hw *hw = &sc->hw;
+	u32 ipgt, tipg;
+
+	/*
+	 * I225 v1 cannot receive the minimum IPG required at 2.5 Gb/s.
+	 * Intel's documented back-to-back workaround is for the transmitter
+	 * to use a 15-byte IPG instead of 12 bytes.  I225 v2 and later have
+	 * the receive-side fix and should retain the standard IPG.
+	 */
+	if (!igc_is_device_id_i225(hw) ||
+	    hw->revision_id >= IGC_REVISION_2)
+		return;
+
+	ipgt = sc->link_speed == SPEED_2500 ? IGC_I225_TIPG_IPGT_2P5 :
+	    DEFAULT_82543_TIPG_IPGT_COPPER;
+	tipg = IGC_READ_REG(hw, IGC_TIPG);
+	if ((tipg & IGC_TIPG_IPGT_MASK) == ipgt)
+		return;
+
+	tipg &= ~IGC_TIPG_IPGT_MASK;
+	tipg |= ipgt;
+	IGC_WRITE_REG(hw, IGC_TIPG, tipg);
+}
+
+static void
 igc_if_update_admin_status(if_ctx_t ctx)
 {
 	struct igc_softc *sc = iflib_get_softc(ctx);
@@ -1436,6 +1483,7 @@ igc_if_update_admin_status(if_ctx_t ctx)
 		sc->link_active = 0;
 		iflib_link_state_change(ctx, LINK_STATE_DOWN, 0);
 	}
+	igc_apply_i225_ipg_workaround(sc);
 	igc_update_stats_counters(sc);
 }
 
@@ -1496,6 +1544,42 @@ igc_identify_hardware(if_ctx_t ctx)
 		device_printf(dev, "Setup init failure\n");
 		return;
 	}
+}
+
+/*********************************************************************
+ *
+ *  Intel's I225/I226 Specification Update, erratum 2, states that I225
+ *  devices can incorrectly enter L1 substates while CLKREQ# is asserted,
+ *  causing repeated L1-substate entry and exit.  Disable both ASPM and
+ *  PCI-PM L1.2, as the erratum can occur while idle or in D3.
+ *
+ *  I226 devices have a separate erratum where ASPM L1.2 exit latency can
+ *  exceed what the packet buffer can tolerate under load.  Disabling ASPM
+ *  L1.2 on the device itself works around the issue.
+ *
+ **********************************************************************/
+static void
+igc_disable_broken_l1_2(if_ctx_t ctx)
+{
+	device_t dev = iflib_get_dev(ctx);
+	struct igc_softc *sc = iflib_get_softc(ctx);
+	int cap;
+	uint32_t ctl1, mask;
+
+	if (igc_is_device_id_i225(&sc->hw))
+		mask = PCIM_L1PM_CTL1_ASPM_L1_2 |
+		    PCIM_L1PM_CTL1_PCIPM_L1_2;
+	else if (igc_is_device_id_i226(&sc->hw))
+		mask = PCIM_L1PM_CTL1_ASPM_L1_2;
+	else
+		return;
+
+	if (pci_find_extcap(dev, PCIZ_L1PM, &cap) != 0)
+		return;
+
+	ctl1 = pci_read_config(dev, cap + PCIR_L1PM_CTL1, 4);
+	ctl1 &= ~mask;
+	pci_write_config(dev, cap + PCIR_L1PM_CTL1, ctl1, 4);
 }
 
 static int
@@ -2346,14 +2430,85 @@ igc_initialize_receive_unit(if_ctx_t ctx)
 }
 
 static void
+igc_if_vlan_register(if_ctx_t ctx, u16 vtag)
+{
+	struct igc_softc *sc = iflib_get_softc(ctx);
+	u32 index, mask;
+
+	index = (vtag >> 5) & 0x7f;
+	mask = 1U << (vtag & 0x1f);
+	if ((sc->shadow_vfta[index] & mask) != 0)
+		return;
+	sc->shadow_vfta[index] |= mask;
+	igc_write_vfta(&sc->hw, index, sc->shadow_vfta[index]);
+}
+
+static void
+igc_if_vlan_unregister(if_ctx_t ctx, u16 vtag)
+{
+	struct igc_softc *sc = iflib_get_softc(ctx);
+	u32 index, mask;
+
+	index = (vtag >> 5) & 0x7f;
+	mask = 1U << (vtag & 0x1f);
+	if ((sc->shadow_vfta[index] & mask) == 0)
+		return;
+	sc->shadow_vfta[index] &= ~mask;
+	igc_write_vfta(&sc->hw, index, sc->shadow_vfta[index]);
+}
+
+static bool
+igc_if_vlan_filter_capable(if_ctx_t ctx)
+{
+	if_t ifp = iflib_get_ifp(ctx);
+
+	return ((if_getcapenable(ifp) & IFCAP_VLAN_HWFILTER) != 0 &&
+	    !igc_disable_crc_stripping);
+}
+
+static bool
+igc_if_vlan_filter_used(if_ctx_t ctx)
+{
+	struct igc_softc *sc = iflib_get_softc(ctx);
+
+	if (!igc_if_vlan_filter_capable(ctx))
+		return (false);
+
+	for (int i = 0; i < IGC_VFTA_SIZE; i++)
+		if (sc->shadow_vfta[i] != 0)
+			return (true);
+
+	return (false);
+}
+
+static void
+igc_if_vlan_filter_enable(struct igc_softc *sc)
+{
+	u32 reg;
+
+	reg = IGC_READ_REG(&sc->hw, IGC_RCTL);
+	reg &= ~IGC_RCTL_CFIEN;
+	reg |= IGC_RCTL_VFE;
+	IGC_WRITE_REG(&sc->hw, IGC_RCTL, reg);
+}
+
+static void
+igc_if_vlan_filter_disable(struct igc_softc *sc)
+{
+	u32 reg;
+
+	reg = IGC_READ_REG(&sc->hw, IGC_RCTL);
+	reg &= ~(IGC_RCTL_VFE | IGC_RCTL_CFIEN);
+	IGC_WRITE_REG(&sc->hw, IGC_RCTL, reg);
+}
+
+static void
 igc_setup_vlan_hw_support(if_ctx_t ctx)
 {
 	struct igc_softc *sc = iflib_get_softc(ctx);
 	struct igc_hw *hw = &sc->hw;
-	struct ifnet *ifp = iflib_get_ifp(ctx);
+	if_t ifp = iflib_get_ifp(ctx);
 	u32 reg;
-
-	/* igc hardware doesn't seem to implement VFTA for HWFILTER */
 
 	if (if_getcapenable(ifp) & IFCAP_VLAN_HWTAGGING &&
 	    !igc_disable_crc_stripping) {
@@ -2365,6 +2520,20 @@ igc_setup_vlan_hw_support(if_ctx_t ctx)
 		reg &= ~IGC_CTRL_VME;
 		IGC_WRITE_REG(hw, IGC_CTRL, reg);
 	}
+
+	if (!igc_if_vlan_filter_capable(ctx)) {
+		igc_if_vlan_filter_disable(sc);
+		return;
+	}
+
+	/* Always admit priority-tagged frames. */
+	sc->shadow_vfta[0] |= 1U;
+
+	/* A reset may clear the VFTA, so restore the complete desired table. */
+	for (int i = 0; i < IGC_VFTA_SIZE; i++)
+		igc_write_vfta(hw, i, sc->shadow_vfta[i]);
+
+	igc_if_vlan_filter_enable(sc);
 }
 
 static void
@@ -2529,6 +2698,7 @@ igc_update_stats_counters(struct igc_softc *sc)
 	u64 prev_xoffrxc = sc->stats.xoffrxc;
 
 	sc->stats.crcerrs += IGC_READ_REG(&sc->hw, IGC_CRCERRS);
+	sc->stats.rxerrc += IGC_READ_REG(&sc->hw, IGC_RXERRC);
 	sc->stats.mpc += IGC_READ_REG(&sc->hw, IGC_MPC);
 	sc->stats.scc += IGC_READ_REG(&sc->hw, IGC_SCC);
 	sc->stats.ecol += IGC_READ_REG(&sc->hw, IGC_ECOL);
@@ -2536,7 +2706,7 @@ igc_update_stats_counters(struct igc_softc *sc)
 	sc->stats.mcc += IGC_READ_REG(&sc->hw, IGC_MCC);
 	sc->stats.latecol += IGC_READ_REG(&sc->hw, IGC_LATECOL);
 	sc->stats.colc += IGC_READ_REG(&sc->hw, IGC_COLC);
-	sc->stats.colc += IGC_READ_REG(&sc->hw, IGC_RERC);
+	sc->stats.rerc += IGC_READ_REG(&sc->hw, IGC_RERC);
 	sc->stats.dc += IGC_READ_REG(&sc->hw, IGC_DC);
 	sc->stats.rlec += IGC_READ_REG(&sc->hw, IGC_RLEC);
 	sc->stats.xonrxc += IGC_READ_REG(&sc->hw, IGC_XONRXC);
@@ -2615,10 +2785,14 @@ igc_if_get_counter(if_ctx_t ctx, ift_counter cnt)
 	case IFCOUNTER_COLLISIONS:
 		return (sc->stats.colc);
 	case IFCOUNTER_IERRORS:
+		/*
+		 * RERC overlaps the counters below and, on I225, omits length
+		 * errors.  RFC covers bad-CRC runts that CRCERRS does not count.
+		 */
 		return (sc->dropped_pkts + sc->stats.rxerrc +
 		    sc->stats.crcerrs + sc->stats.algnerrc +
-		    sc->stats.ruc + sc->stats.roc +
-		    sc->stats.mpc + sc->stats.htdpmc);
+		    sc->stats.ruc + sc->stats.rfc + sc->stats.roc +
+		    sc->stats.mpc);
 	case IFCOUNTER_OERRORS:
 		return (sc->stats.ecol + sc->stats.latecol +
 		    sc->watchdog_events);
@@ -2841,6 +3015,9 @@ igc_add_hw_stats(struct igc_softc *sc)
 	SYSCTL_ADD_UQUAD(ctx, stat_list, OID_AUTO, "recv_errs",
 	    CTLFLAG_RD, &sc->stats.rxerrc,
 	    "Receive Errors");
+	SYSCTL_ADD_UQUAD(ctx, stat_list, OID_AUTO, "recv_error_count",
+	    CTLFLAG_RD, &sc->stats.rerc,
+	    "Receive Error Count (RERC)");
 	SYSCTL_ADD_UQUAD(ctx, stat_list, OID_AUTO, "crc_errs",
 	    CTLFLAG_RD, &sc->stats.crcerrs,
 	    "CRC errors");
@@ -2917,6 +3094,9 @@ igc_add_hw_stats(struct igc_softc *sc)
 	SYSCTL_ADD_UQUAD(ctx, stat_list, OID_AUTO, "good_pkts_txd",
 	    CTLFLAG_RD, &sc->stats.gptc,
 	    "Good Packets Transmitted");
+	SYSCTL_ADD_UQUAD(ctx, stat_list, OID_AUTO, "host_tx_discarded",
+	    CTLFLAG_RD, &sc->stats.htdpmc,
+	    "Host Packets Discarded by Transmit MAC");
 	SYSCTL_ADD_UQUAD(ctx, stat_list, OID_AUTO, "bcast_pkts_txd",
 	    CTLFLAG_RD, &sc->stats.bptc,
 	    "Broadcast Packets Transmitted");
@@ -3178,6 +3358,16 @@ igc_set_flowcntl(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 
+static void
+igc_sysctl_request_reinit(struct igc_softc *sc)
+{
+	if ((if_getflags(iflib_get_ifp(sc->ctx)) & IFF_UP) == 0)
+		return;
+
+	iflib_request_reset(sc->ctx);
+	iflib_admin_intr_deferred(sc->ctx);
+}
+
 /*
  * Manage DMA Coalesce:
  * Control values:
@@ -3223,7 +3413,7 @@ igc_sysctl_dmac(SYSCTL_HANDLER_ARGS)
 			return (EINVAL);
 	}
 	/* Reinit the interface */
-	igc_if_init(sc->ctx);
+	igc_sysctl_request_reinit(sc);
 	return (error);
 }
 
@@ -3244,7 +3434,7 @@ igc_sysctl_eee(SYSCTL_HANDLER_ARGS)
 		return (error);
 
 	sc->hw.dev_spec._i225.eee_disable = (value != 0);
-	igc_if_init(sc->ctx);
+	igc_sysctl_request_reinit(sc);
 
 	return (0);
 }

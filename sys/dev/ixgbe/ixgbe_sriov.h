@@ -47,6 +47,8 @@
 #define IXGBE_VF_CAP_MAC        (1 << 1) /* VF is permitted to change MAC. */
 #define IXGBE_VF_CAP_VLAN       (1 << 2) /* VF is permitted to join vlans. */
 #define IXGBE_VF_ACTIVE         (1 << 3) /* VF is active. */
+#define IXGBE_VF_ANTI_SPOOF     (1 << 4) /* Enforce source identity. */
+#define IXGBE_VF_ALLOW_PROMISC  (1 << 5) /* VF may request promiscuity. */
 #define IXGBE_VF_INDEX(vmdq)    ((vmdq) / 32)
 #define IXGBE_VF_BIT(vmdq)      (1 << ((vmdq) % 32))
 
@@ -60,11 +62,15 @@
 #define IXGBE_API_VER_1_0	0
 #define IXGBE_API_VER_2_0	1	/* Solaris API.  Not supported. */
 #define IXGBE_API_VER_1_1	2
+#define IXGBE_API_VER_1_2	3
+#define IXGBE_API_VER_1_3	4
 #define IXGBE_API_VER_UNKNOWN	UINT16_MAX
 
 #define IXGBE_NO_VM             0
 #define IXGBE_32_VM             32
 #define IXGBE_64_VM             64
+#define IXGBE_MAX_PF_MAC_FILTERS 15
+#define IXGBE_MAX_VF_MAC_FILTERS 3
 
 int  ixgbe_if_iov_vf_add(if_ctx_t, u16, const nvlist_t *);
 int  ixgbe_if_iov_init(if_ctx_t, u16, const nvlist_t *);
@@ -72,6 +78,7 @@ void ixgbe_if_iov_uninit(if_ctx_t);
 void ixgbe_initialize_iov(struct ixgbe_softc *);
 void ixgbe_recalculate_max_frame(struct ixgbe_softc *);
 void ixgbe_ping_all_vfs(struct ixgbe_softc *);
+u_int ixgbe_iov_rebuild_mta(struct ixgbe_softc *);
 int  ixgbe_pci_iov_detach(device_t);
 void ixgbe_define_iov_schemas(device_t, int *);
 void ixgbe_align_all_queue_indices(struct ixgbe_softc *);

@@ -548,6 +548,15 @@ do_fork(struct thread *td, struct fork_req *fr, struct proc *p2, struct thread *
 	    P2_STKGAP_DISABLE | P2_STKGAP_DISABLE_EXEC | P2_NO_NEW_PRIVS |
 	    P2_WXORX_DISABLE | P2_WXORX_ENABLE_EXEC | P2_LOGSIGEXIT_CTL |
 	    P2_LOGSIGEXIT_ENABLE);
+	if ((fr->fr_flags & RFPROCDESC) != 0) {
+		p2->p_zombieref = PZOMBIEREF_PROCDESC;
+		if ((fr->fr_pd_flags & PD_NOWAITPID) == 0 &&
+		    (fr->fr_flags & RFNOWAIT) == 0)
+			p2->p_zombieref |= (PZOMBIEREF_PARENT |
+			    PZOMBIEREF_NEEDPARENT);
+	} else {
+		p2->p_zombieref = PZOMBIEREF_PARENT | PZOMBIEREF_NEEDPARENT;
+	}
 	p2->p_swtick = ticks;
 	if (p1->p_flag & P_PROFIL)
 		startprofclock(p2);
@@ -700,6 +709,13 @@ do_fork(struct thread *td, struct fork_req *fr, struct proc *p2, struct thread *
 	if (p2->p_reaper == p1 && p1 != initproc) {
 		p2->p_reapsubtree = p2->p_pid;
 		proc_id_set_cond(PROC_ID_REAP, p2->p_pid);
+	} else {
+		/*
+		 * Explicitly copy this field under the proctree lock, as it
+		 * might have changed since the bulk copying of the parent's
+		 * fields.
+		 */
+		p2->p_reapsubtree = p1->p_reapsubtree;
 	}
 	sx_xunlock(&proctree_lock);
 
@@ -823,6 +839,15 @@ do_fork(struct thread *td, struct fork_req *fr, struct proc *p2, struct thread *
 		PROC_UNLOCK(p2);
 		sx_xunlock(&proctree_lock);
 	}
+
+	/*
+	 * Activate procdesc NOTE_FORK after we attached the debugger
+	 * to the child.  This guarantees that a debugger which does
+	 * kevent() on the process descriptor to get notifications of
+	 * fork events, can properly observe the child right after the
+	 * notification fired.
+	 */
+	procdesc_fork(p1, p2->p_pid);
 
 	racct_proc_fork_done(p2);
 

@@ -31,29 +31,28 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/caprights.h>
+#include <sys/filedesc.h>
 #include <sys/imgact.h>
 #include <sys/ktr.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
+#include <sys/malloc.h>
 #include <sys/mman.h>
 #include <sys/mutex.h>
+#include <sys/priv.h>
+#include <sys/proc.h>
+#include <sys/ptrace.h>
 #include <sys/reg.h>
+#include <sys/rwlock.h>
+#include <sys/signalvar.h>
 #include <sys/sleepqueue.h>
+#include <sys/sx.h>
 #include <sys/syscallsubr.h>
 #include <sys/sysent.h>
 #include <sys/sysproto.h>
-#include <sys/priv.h>
-#include <sys/proc.h>
 #include <sys/vnode.h>
-#include <sys/ptrace.h>
-#include <sys/rwlock.h>
-#include <sys/sx.h>
-#include <sys/malloc.h>
-#include <sys/signalvar.h>
-#include <sys/caprights.h>
-#include <sys/filedesc.h>
 
 #include <security/audit/audit.h>
 
@@ -418,6 +417,7 @@ vmspace_rwmem(struct vmspace *vm, struct uio *uio)
 	vm_map_t map;
 	vm_offset_t pageno;		/* page number */
 	vm_prot_t reqprot;
+	ssize_t orig_resid;
 	int error, fault_flags, page_offset, writing;
 
 	map = &vm->vm_map;
@@ -431,10 +431,12 @@ vmspace_rwmem(struct vmspace *vm, struct uio *uio)
 	reqprot = writing ? VM_PROT_COPY | VM_PROT_READ : VM_PROT_READ;
 	fault_flags = writing ? VM_FAULT_DIRTY : VM_FAULT_NORMAL;
 
+	orig_resid = uio->uio_resid;
+
 	if (writing) {
 		error = priv_check(curthread, PRIV_PROC_MEM_WRITE);
 		if (error != 0)
-			goto out;
+			return (error);
 	}
 
 	/*
@@ -491,9 +493,7 @@ vmspace_rwmem(struct vmspace *vm, struct uio *uio)
 		vm_page_unwire(m, PQ_ACTIVE);
 
 	} while (error == 0 && uio->uio_resid > 0);
-
-out:
-	return (error);
+	return (uio->uio_resid == orig_resid ? error : 0);
 }
 
 int
@@ -1378,7 +1378,7 @@ kern_ptrace(struct thread *td, int req, pid_t pid, void *addr, int data)
 		break;
 
 	case PT_GET_SC_RET:
-		if ((td2->td_dbgflags & (TDB_SCX)) == 0
+		if ((td2->td_dbgflags & TDB_SCX) == 0
 #ifdef COMPAT_FREEBSD32
 		    || (wrap32 && !safe)
 #endif

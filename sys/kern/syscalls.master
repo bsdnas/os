@@ -3422,4 +3422,18 @@
 		    int flags
 		);
 	}
+603	AUE_PDOPENPID	STD {
+		int pdopenpid(
+		    pid_t pid,
+		    int flags
+		);
+	}
+604	AUE_NULL	STD {
+		int pddupfd(
+			int pd,
+			int fd,
+			int flags
+		);
+	}
+
 ; vim: syntax=off

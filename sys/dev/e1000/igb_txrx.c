@@ -515,7 +515,8 @@ igb_isc_rxd_pkt_get(void *arg, if_rxd_info_t ri)
 
 	if (staterr & E1000_RXD_STAT_VP) {
 		if (((sc->hw.mac.type == e1000_i350) ||
-		    (sc->hw.mac.type == e1000_i354)) &&
+		    (sc->hw.mac.type == e1000_i354) ||
+		    (sc->hw.mac.type == e1000_vfadapt_i350)) &&
 		    (staterr & E1000_RXDEXT_STATERR_LB))
 			ri->iri_vtag = be16toh(rxd->wb.upper.vlan);
 		else
@@ -593,6 +594,12 @@ igb_determine_rsstype(uint16_t pkt_info)
 		return M_HASHTYPE_RSS_IPV6;
 	case E1000_RXDADV_RSSTYPE_IPV6_TCP_EX:
 		return M_HASHTYPE_RSS_TCP_IPV6_EX;
+	case E1000_RXDADV_RSSTYPE_IPV4_UDP:
+		return M_HASHTYPE_RSS_UDP_IPV4;
+	case E1000_RXDADV_RSSTYPE_IPV6_UDP:
+		return M_HASHTYPE_RSS_UDP_IPV6;
+	case E1000_RXDADV_RSSTYPE_IPV6_UDP_EX:
+		return M_HASHTYPE_RSS_UDP_IPV6_EX;
 	default:
 		return M_HASHTYPE_OPAQUE;
 	}

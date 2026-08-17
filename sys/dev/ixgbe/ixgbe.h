@@ -345,6 +345,13 @@ struct ix_tx_queue {
 
 #define IXGBE_MAX_VF_MC	30	/* Max number of multicast entries */
 
+struct ixgbe_vf_mac_filter {
+	uint16_t	rar_index;
+	uint16_t	pool;
+	bool		active;
+	uint8_t		mac[ETHER_ADDR_LEN];
+};
+
 struct ixgbe_vf {
 	u_int		pool;
 	u_int		rar_index;
@@ -352,10 +359,13 @@ struct ixgbe_vf {
 	uint32_t	flags;
 	uint8_t		ether_addr[ETHER_ADDR_LEN];
 	uint16_t	mc_hash[IXGBE_MAX_VF_MC];
+	uint32_t	vlans[IXGBE_VFTA_SIZE];
 	uint16_t	num_mc_hashes;
+	uint16_t	num_mac_filters;
+	uint16_t	num_vlans;
 	uint16_t	default_vlan;
-	uint16_t	vlan_tag;
 	uint16_t	api_ver;
+	uint8_t		xcast_mode;
 };
 
 /* Our softc structure */
@@ -396,6 +406,11 @@ struct ixgbe_softc {
 	 * to repopulate it.
 	 */
 	u32			shadow_vfta[IXGBE_VFTA_SIZE];
+	u32			vf_vfta_retry[IXGBE_VFTA_SIZE];
+	sbintime_t		vf_vlan_retry_deadline;
+	u32			vf_vlan_retry_tick;
+	u16			vf_vlan_retry_cursor;
+	bool			vf_mcast_overflow_warned;
 
 	/* Info about the interface */
 	int			advertise;	/* link speeds */
@@ -441,6 +456,11 @@ struct ixgbe_softc {
 	int			num_vfs;
 	int			pool;
 	struct ixgbe_vf		*vfs;
+	struct ixgbe_vf_mac_filter *vf_mac_filters;
+	int			num_vf_mac_filters;
+	bool			iov_mta_valid;
+	bool			iov_vfta_valid;
+	bool			iov_vlan_promisc;
 
 	/* Bypass */
 	struct ixgbe_bp_data	bypass;
@@ -606,6 +626,7 @@ void ixgbe_free_transmit_structures(struct ixgbe_softc *);
 int  ixgbe_setup_receive_structures(struct ixgbe_softc *);
 void ixgbe_free_receive_structures(struct ixgbe_softc *);
 int  ixgbe_get_regs(SYSCTL_HANDLER_ARGS);
+void ixgbe_setup_vlan_hw_support(if_ctx_t);
 
 void ixgbe_add_fw_logging_tunables(struct ixgbe_softc *sc,
 	struct sysctl_oid *parent);

@@ -1226,6 +1226,27 @@ em_if_attach_pre(if_ctx_t ctx)
 	em_setup_msix(ctx);
 	e1000_get_bus_info(hw);
 
+	/*
+	 * Some conventional PCI systems hang when e1000 devices use
+	 * DMA addresses above 4 GB.  Keep PCI-mode DMA below that boundary
+	 * by default; PCI-X and PCIe retain 64-bit DMA.
+	 */
+	if (hw->bus.type == e1000_bus_type_pci) {
+		SYSCTL_ADD_BOOL(ctx_list, child, OID_AUTO, "allow_64bit_dma",
+		    CTLFLAG_RDTUN, &sc->allow_64bit_dma, 0,
+		    "Allow 64-bit DMA in conventional PCI mode");
+		if (sc->allow_64bit_dma)
+			device_printf(dev, "64-bit DMA in conventional PCI mode.  "
+			    "Some chipsets are unstable.\n");
+		else {
+			scctx->isc_dma_width = 32;
+			device_printf(dev, "32-bit DMA in conventional PCI mode.  "
+			    "Set dev.%s.%d.allow_64bit_dma=1 at boot to enable "
+			    "64-bit DMA if the chipset is stable with it.\n",
+			    device_get_name(dev), device_get_unit(dev));
+		}
+	}
+
 	/* Set up some sysctls for the tunable interrupt delays */
 	if (hw->mac.type < igb_mac_min) {
 		em_add_int_delay_sysctl(sc, "rx_int_delay",
@@ -1473,8 +1494,6 @@ em_if_resume(if_ctx_t ctx)
 
 	if (sc->hw.mac.type == e1000_pch2lan)
 		e1000_resume_workarounds_pchlan(&sc->hw);
-	em_if_init(ctx);
-	em_init_manageability(sc);
 
 	return(0);
 }
@@ -2094,8 +2113,6 @@ em_if_media_change(if_ctx_t ctx)
 	default:
 		device_printf(sc->dev, "Unsupported media type\n");
 	}
-
-	em_if_init(ctx);
 
 	return (0);
 }
@@ -3697,7 +3714,14 @@ em_initialize_transmit_unit(if_ctx_t ctx)
 		/* Clear checksum offload context. */
 		offp = (caddr_t)&txr->csum_flags;
 		endp = (caddr_t)(txr + 1);
-		bzero(offp, endp - offp);
+		memset(offp, 0, endp - offp);
+
+		if (hw->mac.type >= igb_mac_min) {
+			txdctl = E1000_READ_REG(hw, E1000_TXDCTL(i));
+			E1000_WRITE_REG(hw, E1000_TXDCTL(i),
+			    txdctl & ~E1000_TXDCTL_QUEUE_ENABLE);
+			E1000_WRITE_FLUSH(hw);
+		}
 
 		/* Base and Len of TX Ring */
 		E1000_WRITE_REG(hw, E1000_TDLEN(i),
@@ -3716,9 +3740,12 @@ em_initialize_transmit_unit(if_ctx_t ctx)
 		txdctl |= 0x1f; /* PTHRESH */
 		txdctl |= 1 << 8; /* HTHRESH */
 		txdctl |= 1 << 16;/* WTHRESH */
-		txdctl |= 1 << 22; /* Reserved bit 22 must always be 1 */
-		txdctl |= E1000_TXDCTL_GRAN;
-		txdctl |= 1 << 25; /* LWTHRESH */
+		if (hw->mac.type < igb_mac_min) {
+			txdctl |= 1 << 22; /* Reserved bit must always be 1 */
+			txdctl |= E1000_TXDCTL_GRAN;
+			txdctl |= 1 << 25; /* LWTHRESH */
+		} else
+			txdctl |= E1000_TXDCTL_QUEUE_ENABLE;
 
 		E1000_WRITE_REG(hw, E1000_TXDCTL(i), txdctl);
 	}
@@ -3753,7 +3780,7 @@ em_initialize_transmit_unit(if_ctx_t ctx)
 			sc->txd_cmd |= E1000_TXD_CMD_IDE;
 	}
 
-	if (hw->mac.type >= e1000_82540)
+	if (hw->mac.type >= e1000_82540 && hw->mac.type < igb_mac_min)
 		E1000_WRITE_REG(hw, E1000_TADV, sc->tx_abs_int_delay.value);
 
 	if (hw->mac.type == e1000_82571 || hw->mac.type == e1000_82572) {
@@ -4026,6 +4053,11 @@ em_initialize_receive_unit(if_ctx_t ctx)
 			srrctl |= E1000_SRRCTL_DESCTYPE_ADV_ONEBUF;
 #endif
 
+			rxdctl = E1000_READ_REG(hw, E1000_RXDCTL(i));
+			E1000_WRITE_REG(hw, E1000_RXDCTL(i),
+			    rxdctl & ~E1000_RXDCTL_QUEUE_ENABLE);
+			E1000_WRITE_FLUSH(hw);
+
 			E1000_WRITE_REG(hw, E1000_RDLEN(i),
 			    scctx->isc_nrxd[0] *
 			    sizeof(struct e1000_rx_desc));
@@ -4033,9 +4065,10 @@ em_initialize_receive_unit(if_ctx_t ctx)
 			    (uint32_t)(bus_addr >> 32));
 			E1000_WRITE_REG(hw, E1000_RDBAL(i),
 			    (uint32_t)bus_addr);
+			E1000_WRITE_REG(hw, E1000_RDH(i), 0);
+			E1000_WRITE_REG(hw, E1000_RDT(i), 0);
 			E1000_WRITE_REG(hw, E1000_SRRCTL(i), srrctl);
 			/* Enable this Queue */
-			rxdctl = E1000_READ_REG(hw, E1000_RXDCTL(i));
 			rxdctl |= E1000_RXDCTL_QUEUE_ENABLE;
 			rxdctl &= 0xFFF00000;
 			rxdctl |= IGB_RX_PTHRESH;
@@ -5672,6 +5705,16 @@ em_set_flowcntl(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 
+static void
+em_sysctl_request_reinit(struct e1000_softc *sc)
+{
+	if ((if_getflags(iflib_get_ifp(sc->ctx)) & IFF_UP) == 0)
+		return;
+
+	iflib_request_reset(sc->ctx);
+	iflib_admin_intr_deferred(sc->ctx);
+}
+
 /*
  * Manage DMA Coalesce:
  * Control values:
@@ -5717,7 +5760,7 @@ igb_sysctl_dmac(SYSCTL_HANDLER_ARGS)
 			return (EINVAL);
 	}
 	/* Reinit the interface */
-	em_if_init(sc->ctx);
+	em_sysctl_request_reinit(sc);
 	return (error);
 }
 
@@ -5743,7 +5786,7 @@ em_sysctl_eee(SYSCTL_HANDLER_ARGS)
 		sc->hw.dev_spec.ich8lan.eee_disable = (value != 0);
 	else
 		sc->hw.dev_spec._82575.eee_disable = (value != 0);
-	em_if_init(sc->ctx);
+	em_sysctl_request_reinit(sc);
 
 	return (0);
 }
