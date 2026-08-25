@@ -335,12 +335,13 @@ fd_init(void)
 static int
 bd_init(void)
 {
-	int base, unit;
+	int base, unit, found;
 	bdinfo_t *bd;
 
 	TSENTER();
 
 	base = 0x80;
+	found = 0;
 	for (unit = 0; unit < *(unsigned char *)PTOV(BIOS_NUMDRIVES); unit++) {
 		/*
 		 * Check the BIOS equipment list for number of fixed disks.
@@ -350,15 +351,25 @@ bd_init(void)
 		bd->bd_unit = base + unit;
 		if (!bd_int13probe(bd)) {
 			free(bd);
-			break;
+			/*
+			 * Skip this drive, but keep probing the rest.  A drive
+			 * the BIOS refuses to describe must not hide the
+			 * drives behind it: on a storage appliance that is a
+			 * single dying disk turning into an unbootable box,
+			 * even though the boot pool is mirrored across the
+			 * healthy ones.  The BIOS drive count bounds the loop,
+			 * so probing past a gap stays cheap.
+			 */
+			continue;
 		}
 
-		printf("BIOS drive %c: is %s%d\n", ('C' + unit),
-		    bioshd.dv_name, unit);
+		printf("BIOS drive %c: is %s%d\n", ('C' + found),
+		    bioshd.dv_name, found);
 
 		STAILQ_INSERT_TAIL(&hdinfo, bd, bd_link);
+		found++;
 	}
-	bcache_add_dev(unit);
+	bcache_add_dev(found);
 	TSEXIT();
 	return (0);
 }
