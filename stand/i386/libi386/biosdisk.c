@@ -121,6 +121,8 @@ typedef struct bdinfo
 	int		bd_type;	/* BIOS 'drive type' (floppy only) */
 	uint16_t	bd_sectorsize;	/* Sector size */
 	uint64_t	bd_sectors;	/* Disk size */
+	char		bd_iface[9];	/* EDD interface, "SATA", "USB", ... */
+	uint8_t		bd_port;	/* EDD device path, first byte */
 	int		bd_open;	/* reference counter */
 	void		*bd_bcache;	/* buffer cache data */
 } bdinfo_t;
@@ -363,8 +365,23 @@ bd_init(void)
 			continue;
 		}
 
-		printf("BIOS drive %c: is %s%d\n", ('C' + found),
-		    bioshd.dv_name, found);
+		/*
+		 * Say which physical drive this is while the list is being
+		 * built: if enumeration dies further down, the last line on
+		 * the screen names the drive it died on.
+		 */
+		if (bd->bd_iface[0] != '\0') {
+			printf("BIOS drive %c: is %s%d (%s port %u, %llu MB)\n",
+			    ('C' + found), bioshd.dv_name, found, bd->bd_iface,
+			    bd->bd_port,
+			    (unsigned long long)(bd->bd_sectors /
+			    (1048576 / bd->bd_sectorsize)));
+		} else {
+			printf("BIOS drive %c: is %s%d (%llu MB)\n",
+			    ('C' + found), bioshd.dv_name, found,
+			    (unsigned long long)(bd->bd_sectors /
+			    (1048576 / bd->bd_sectorsize)));
+		}
 
 		STAILQ_INSERT_TAIL(&hdinfo, bd, bd_link);
 		found++;
@@ -604,6 +621,28 @@ bd_get_diskinfo_ext(struct bdinfo *bd)
 		    params->heads * params->sectors_per_track;
 	}
 	bd->bd_sectors = total;
+
+	/*
+	 * EDD 3.0 also describes how the drive is attached.  The BIOS has no
+	 * serial number to offer -- that would take an ATA IDENTIFY, and we
+	 * only ever speak to the BIOS -- but the interface and the port do
+	 * name the physical connector, which is what someone standing in
+	 * front of the machine can act on.  The v3 block was requested above
+	 * and then thrown away, so keeping it costs nothing.
+	 */
+	if (dparams.device_path.key == 0xbedd) {
+		size_t i;
+
+		for (i = 0; i < sizeof(dparams.device_path.interface); i++) {
+			char c = dparams.device_path.interface[i];
+
+			if (c == ' ' || c == '\0')
+				break;
+			bd->bd_iface[i] = c;
+		}
+		bd->bd_iface[i] = '\0';
+		bd->bd_port = ((const uint8_t *)dparams.device_path.device_path)[0];
+	}
 
 	return (0);
 }
