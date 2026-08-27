@@ -118,6 +118,7 @@ typedef struct bdinfo
 #define	BD_FLOPPY	0x0004
 #define	BD_CDROM	0x0008
 #define	BD_NO_MEDIA	0x0010
+#define	BD_FAILED	0x0020
 	int		bd_type;	/* BIOS 'drive type' (floppy only) */
 	uint16_t	bd_sectorsize;	/* Sector size */
 	uint64_t	bd_sectors;	/* Disk size */
@@ -1276,6 +1277,15 @@ bd_io(struct disk_devdesc *dev, bdinfo_t *bd, daddr_t dblk, int blks,
 		return (-1);
 
 	/*
+	 * This drive has already failed an I/O outright.  Do not hand the BIOS
+	 * another chance to spend seconds timing out on it: partition and pool
+	 * probing walks every drive and would stall the whole boot behind the
+	 * one that is dying.
+	 */
+	if ((bd->bd_flags & BD_FAILED) != 0)
+		return (-1);
+
+	/*
 	 * Workaround for a problem with some HP ProLiant BIOS failing to work
 	 * out the boot disk after installation. hrs and kuriyama discovered
 	 * this problem with an HP ProLiant DL320e Gen 8 with a 3TB HDD, and
@@ -1327,6 +1337,17 @@ bd_io(struct disk_devdesc *dev, bdinfo_t *bd, daddr_t dblk, int blks,
 			    dev->dd.d_unit, blks, dblk, dest, VTOP(dest),
 			    result);
 		}
+
+		/*
+		 * Three tries and a reset apiece did not get this off the
+		 * drive.  It will not serve a kernel either, and every
+		 * further request costs more BIOS timeouts while the machine
+		 * looks hung to whoever is watching.  Write it off and get on
+		 * with finding the pools on the drives that still answer.
+		 */
+		bd->bd_flags |= BD_FAILED;
+		printf("%s%d: giving up on this drive\n",
+		    dev->dd.d_dev->dv_name, dev->dd.d_unit);
 	}
 
 	TSEXIT();
