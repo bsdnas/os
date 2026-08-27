@@ -242,6 +242,32 @@ main(void)
 		import_geli_boot_data(gbdata);
 #endif /* LOADER_GELI_SUPPORT */
 
+	/*
+	 * Where everything landed, printed before any device is touched.
+	 * Netbooting bsdnas-metal, the first disk read is handed an address
+	 * the BIOS cannot reach and the loader later returns into its own
+	 * stack -- both point at the pieces below overlapping, and by the
+	 * time it goes wrong there is nothing left to ask.  See
+	 * px-deploy docs/todo/030.  Diagnostic: gate or drop once the
+	 * overlap is understood.
+	 */
+	{
+		char *bio_base, *bio_ptr, *bio_end;
+		int here;
+
+		bio_where(&bio_base, &bio_ptr, &bio_end);
+		printf("map: base 0x%x, image end %p, stack ~%p\n",
+		    __base, end, &here);
+		printf("map: heap %p..%p, brk %p\n", heap_bottom, heap_top,
+		    sbrk(0));
+		printf("map: bio %p..%p at %p, v86buf %p (phys 0x%x)\n",
+		    bio_base, bio_end, bio_ptr, PTOV(V86_IO_BUFFER),
+		    VTOP(PTOV(V86_IO_BUFFER)));
+		printf("map: basemem %uk, extmem %uk, highheap 0x%x+0x%x\n",
+		    bios_basemem / 1024, bios_extmem / 1024,
+		    high_heap_base, high_heap_size);
+	}
+
 	devinit();
 
 	printf("BIOS %dkB/%dkB available memory\n", bios_basemem / 1024,
