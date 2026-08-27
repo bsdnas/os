@@ -673,10 +673,20 @@ rret_tramp.1:	xorl %ecx,%ecx			# Zero
 		popl %esi			# Restore
 		movl V86_CTL(%edx),%edx		# Read V86 control flags
 		testl $V86F_FLAGS,%edx		# User wants flags?
-		jz rret_tramp.3			# No
+		jz rret_tramp.4			# No, still sanitise
 		movl MEM_ESPR-0x3c,%eax		# Read real mode flags
 		andl $~(PSL_T|PSL_NT),%eax	# Clear unsafe flags
 		movw %ax,-0x08(%esi)		# Update user flags (low 16)
+		jmp rret_tramp.3		# Done
+/*
+ * The caller did not ask for the real mode flags, which used to mean their
+ * own flags were handed back untouched.  A BIOS that returns with the trap
+ * flag set then resumes the caller single-stepping, and every instruction
+ * after the call raises #DB until BTX halts on it -- in code that is doing
+ * nothing wrong.  Clear the two flags we must never resume with, whether or
+ * not the caller wanted the rest.
+ */
+rret_tramp.4:	andw $(~(PSL_T|PSL_NT) & 0xffff),-0x08(%esi)
 /*
  * Return to the user task
  */

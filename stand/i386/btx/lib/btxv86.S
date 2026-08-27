@@ -66,8 +66,9 @@ __v86_swap:	xchgl %ebp,0x4(%esp,1)		# Swap pointer, EBP
 		pushf 				# Put eflags
 		popl %eax			#  in EAX
 		xchgl %eax,V86_EFL(%ebp)	# Swap
-		pushl %eax			# Put EAX
-		popf 				#  in eflags
+		andl $~0x100,%eax		# Never load the trap flag: neither
+		pushl %eax			#  side of a BIOS call may resume
+		popf 				#  the other single-stepping
 		movl 0x8(%esp,1),%eax		# Load EBP
 		xchgl %eax,V86_EBP(%ebp)	# Swap
 		movl %eax,0x8(%esp,1)		# Save EBP
