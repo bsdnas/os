@@ -205,6 +205,24 @@ LOADER_DEFAULT_INTERP?=simp
 .endif
 LOADER_INTERP?=${LOADER_DEFAULT_INTERP}
 
+#
+# pxeboot gets the small interpreter, whatever the disk loader uses.
+#
+# A network boot leaves far less conventional memory than a disk boot: the
+# resident PXE stack takes the top of it, and what is left has to hold the
+# loader image, its BSS and its stack.  Measured on a Gigabyte GA-890GPA-UD3H
+# booting through iPXE: 512k of base memory instead of 640k, the lua image
+# ending at 0x7c5c4 and the stack starting at 0x7efc8 -- ten kilobytes between
+# them.  Probing partition tables and ZFS labels does not fit in that, the
+# stack grows down into the loader's own BSS, and the machine dies in data
+# with "BTX halted, int=6".  The Makefile next door already warns that pxeboot
+# has 500k or less to live in; the lua image is over that on its own.
+#
+# simp reads loader.conf, honours currdev and boots, which is all a network
+# boot needs.  The menu belongs to the disk loader, where there is room for it.
+#
+PXEBOOT_DEFAULT_INTERP?=simp
+
 # Make sure we use the machine link we're about to create
 CFLAGS+=-I.
 
