@@ -1112,6 +1112,36 @@ bd_realstrategy(void *devdata, int rw, daddr_t dblk, size_t size,
 		/* Use alternate 4k buffer */
 		bbuf = PTOV(V86_IO_BUFFER);
 	}
+
+	/*
+	 * The BIOS is called in real mode and can only reach the first
+	 * megabyte, so the buffer we hand it has to live there.  Check it
+	 * rather than let the BIOS refuse the transfer with a parameter error
+	 * that reads like a failing disk -- that cost a day of chasing the
+	 * wrong drive.  Report once what the buffer was and where it came
+	 * from, then fall back on the buffer BTX reserves for exactly this.
+	 */
+	if (VTOP(bbuf) + bio_size > 0x100000 || VTOP(bbuf) < 0x500) {
+		static bool complained = false;
+
+		if (!complained) {
+			char *bio_base, *bio_ptr, *bio_end;
+
+			bio_where(&bio_base, &bio_ptr, &bio_end);
+			printf("bd: I/O buffer %p (phys 0x%x) is out of reach "
+			    "of the BIOS\n", bbuf, VTOP(bbuf));
+			printf("bd: bio buffer %p..%p, now at %p; "
+			    "V86 buffer %p (phys 0x%x)\n", bio_base, bio_end,
+			    bio_ptr, PTOV(V86_IO_BUFFER),
+			    VTOP(PTOV(V86_IO_BUFFER)));
+			complained = true;
+		}
+		if (bbuf != PTOV(V86_IO_BUFFER)) {
+			bio_free(bbuf, bio_size);
+			bbuf = PTOV(V86_IO_BUFFER);
+			bio_size = V86_IO_BUFFER_SIZE;
+		}
+	}
 	rest = size;
 	rc = 0;
 	while (blks > 0) {
