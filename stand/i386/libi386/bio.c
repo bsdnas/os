@@ -62,3 +62,17 @@ bio_free(void *ptr, size_t size)
 	if (bio_buffer_ptr != ptr)
 		panic("bio_alloc()/bio_free() mismatch\n");
 }
+
+/*
+ * Where the buffer stands right now.  Used when an I/O turns out to have been
+ * handed an address the BIOS cannot reach: whether the bump allocator ran dry
+ * or walked out of its own buffer is the difference between two very
+ * different bugs, and neither is visible from the caller.
+ */
+void
+bio_where(char **base, char **ptr, char **end)
+{
+	*base = bio_buffer;
+	*ptr = bio_buffer_ptr;
+	*end = bio_buffer_end;
+}

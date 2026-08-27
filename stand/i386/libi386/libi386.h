@@ -122,6 +122,7 @@ extern vm_offset_t	high_heap_base;	/* for use as the heap */
 #define	BIO_BUFFER_SIZE 0x4000
 void *bio_alloc(size_t size);
 void bio_free(void *ptr, size_t size);
+void bio_where(char **base, char **ptr, char **end);
 
 /*
  * Values for width parameter to biospci_{read,write}_config
