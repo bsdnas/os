@@ -1097,8 +1097,19 @@ bd_realstrategy(void *devdata, int rw, daddr_t dblk, size_t size,
 		DPRINTF("short I/O %d", blks);
 	}
 
+	/*
+	 * Ask for a bounce buffer down to a single sector.  The loop used to
+	 * stop at "> sectorsize", so a one sector read -- which is every
+	 * partition table and every ZFS label probe -- never called bio_alloc
+	 * at all and fell straight through to the fallback below.  That
+	 * fallback is PTOV(V86_IO_BUFFER), a fixed physical address of
+	 * 0x8000, and PTOV subtracts the base BTX loaded the client at.  When
+	 * that base is above 0x8000, as it is for pxeboot, the result goes
+	 * negative -- 0xffffe000 -- and the BIOS refuses every transfer with
+	 * a parameter error that reads like a dying disk.
+	 */
 	bio_size = min(BIO_BUFFER_SIZE, size);
-	while (bio_size > bd->bd_sectorsize) {
+	while (bio_size >= bd->bd_sectorsize) {
 		bbuf = bio_alloc(bio_size);
 		if (bbuf != NULL)
 			break;

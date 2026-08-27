@@ -169,6 +169,16 @@ main(void)
 		setenv("console", "comconsole", 1);
 	} else if (initial_howto & RB_MUTE) {
 		setenv("console", "nullconsole", 1);
+	} else {
+		/*
+		 * Nothing was requested, which is what a network boot looks
+		 * like: iPXE hands over without setting either flag.  Speak on
+		 * both consoles rather than only the screen -- on an appliance
+		 * the serial line is the only way anyone sees the loader at
+		 * all, and everything printed before loader.conf is read was
+		 * being lost.
+		 */
+		setenv("console", "vidconsole,comconsole", 1);
 	}
 	cons_probe();
 
