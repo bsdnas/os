@@ -218,10 +218,14 @@ LOADER_INTERP?=${LOADER_DEFAULT_INTERP}
 # with "BTX halted, int=6".  The Makefile next door already warns that pxeboot
 # has 500k or less to live in; the lua image is over that on its own.
 #
-# simp reads loader.conf, honours currdev and boots, which is all a network
-# boot needs.  The menu belongs to the disk loader, where there is room for it.
+# 4th is the middle size and the one upstream reports as working over PXE (see
+# FreeBSD PR 257018, "lua too big? 4th works"): 382k against 443k, which leaves
+# roughly seventy kilobytes of stack instead of ten.  It also parses
+# loader.conf the ordinary way, so nothing has to keep a list of modules by
+# hand -- simp would boot in even less space but understands no loader.conf at
+# all.  The lua menu stays with the disk loader, where there is room for it.
 #
-PXEBOOT_DEFAULT_INTERP?=simp
+PXEBOOT_DEFAULT_INTERP?=4th
 
 # Make sure we use the machine link we're about to create
 CFLAGS+=-I.
